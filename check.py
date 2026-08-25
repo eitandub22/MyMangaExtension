@@ -1,9 +1,9 @@
 """Asserts the live sites still match what MyCurated.kt parses.
 
 Run before rebuilding the APK: `python check.py`. Failure here means a site changed and the
-Kotlin parser needs updating -- not that the build is broken. Mirrors the Kotlin logic:
-probe the post type, page through the chapter list, parse chapter numbers from titles,
-then pull one chapter's images by slug.
+Kotlin parser needs updating -- not that the build is broken. Mirrors the Kotlin logic,
+including the dispatch: a manifest URL with a path is a Madara series, a bare host is a
+WordPress REST site.
 """
 
 import html
@@ -12,6 +12,8 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from collections import Counter
+from urllib.parse import urlparse
 
 MANIFEST = "manga.json"
 PER_PAGE = 100
@@ -23,23 +25,43 @@ UA = (
 )
 
 
-def get(url):
-    """Returns (status, body). Follows redirects, which the bare mirror domains need."""
+def get(url, data=None):
+    """Returns (status, body); POSTs when data is set. Follows redirects, which the bare
+    mirror domains need."""
     try:
         with urllib.request.urlopen(
-            urllib.request.Request(url, headers={"User-Agent": UA}), timeout=60
+            urllib.request.Request(url, data=data, headers={"User-Agent": UA}), timeout=60
         ) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, ""
 
 
-def rest(site, post_type, query):
+def number(title):
+    match = CHAPTER_NUMBER.search(title)
+    return float(match.group(1)) if match else None
+
+
+def assert_chapters(names, site):
+    """The two ways a chapter list turns out not to be a chapter list."""
+    unnumbered = [n for n in names if number(n) is None]
+    assert not unnumbered, f"{len(unnumbered)} titles have no chapter number, e.g. {unnumbered[:2]}"
+
+    repeated = [n for n, count in Counter(number(n) for n in names).items() if count > 1]
+    assert not repeated, (
+        f"chapter numbers {sorted(repeated)[:5]} appear more than once -- {site} is probably "
+        "several series, or a blog, rather than one manga"
+    )
+
+
+# --- WordPress REST: the manifest entry is a site root ------------------------------------
+
+def rest_url(site, post_type, query):
     return f"{site}/wp-json/wp/v2/{post_type}?{query}"
 
 
 def post_type(site):
-    status, body = get(rest(site, "comic", "per_page=1"))
+    status, body = get(rest_url(site, "comic", "per_page=1"))
     return "comic" if status == 200 and body.strip() != "[]" else "posts"
 
 
@@ -47,7 +69,7 @@ def chapter_list(site, kind):
     posts, page = [], 1
     while page <= MAX_PAGES:
         status, body = get(
-            rest(site, kind, f"per_page={PER_PAGE}&page={page}&_fields=slug,title,date_gmt")
+            rest_url(site, kind, f"per_page={PER_PAGE}&page={page}&_fields=slug,title,date_gmt")
         )
         if status != 200:
             break
@@ -59,29 +81,54 @@ def chapter_list(site, kind):
     return posts
 
 
-def check(entry):
-    site = entry["url"].rstrip("/")
+def check_rest(site):
     kind = post_type(site)
     posts = chapter_list(site, kind)
     assert posts, f"no chapters returned from {site} ({kind})"
+    assert_chapters([html.unescape(p["title"]["rendered"]) for p in posts], site)
 
-    numbered, unnumbered = [], []
-    for post in posts:
-        title = html.unescape(post["title"]["rendered"])
-        match = CHAPTER_NUMBER.search(title)
-        (numbered if match else unnumbered).append(title)
-    assert not unnumbered, f"{len(unnumbered)} titles have no chapter number, e.g. {unnumbered[:2]}"
-
-    # Pages come from a slug lookup, exactly as getPageList does.
+    # Pages come from a slug lookup, exactly as restImages does.
     slug = posts[0]["slug"]
-    status, body = get(rest(site, kind, f"slug={slug}&_fields=content"))
+    status, body = get(rest_url(site, kind, f"slug={slug}&_fields=content"))
     assert status == 200, f"slug lookup failed with HTTP {status}"
     found = json.loads(body)
     assert found, f"slug '{slug}' returned nothing"
     images = re.findall(r"<img[^>]+\ssrc=\"([^\"]+)\"", found[0]["content"]["rendered"])
     assert images, f"no <img src> in chapter '{slug}'"
 
-    print(f"  type={kind} chapters={len(posts)} newest='{slug}' images={len(images)}")
+    return f"  shape=rest type={kind} chapters={len(posts)} newest='{slug}' images={len(images)}"
+
+
+# --- Madara: the manifest entry is a series URL -------------------------------------------
+
+def check_madara(site):
+    status, body = get(site + "/ajax/chapters/", data=b"")
+    assert status == 200, f"ajax/chapters/ returned HTTP {status}"
+
+    chapters = []
+    # The theme wraps the attribute onto its own line, so <li> and class= are not adjacent.
+    for item in re.findall(r"<li[^>]*class=\"wp-manga-chapter.*?</li>", body, re.S):
+        link = re.search(r"<a href=\"([^\"]+)\"[^>]*>(.*?)</a>", item, re.S)
+        assert link, f"chapter entry with no link: {item[:80]}"
+        chapters.append((html.unescape(re.sub(r"\s+", " ", link.group(2)).strip()), link.group(1)))
+    assert chapters, "no li.wp-manga-chapter entries in the ajax response"
+    assert_chapters([name for name, _ in chapters], site)
+
+    newest_name, newest_url = max(chapters, key=lambda c: number(c[0]))
+    # Any query string bypasses the page cache; the cached copy ships an empty reader.
+    status, page = get(newest_url + "?cache=0")
+    assert status == 200, f"chapter page returned HTTP {status}"
+    numbered = [t for t in re.findall(r"<img[^>]*>", page) if re.search(r"id=\"image-\d+\"", t)]
+    images = [m.group(1) for m in (re.search(r"src=\"([^\"]+)\"", t) for t in numbered) if m]
+    assert images, f"no id=image-N images in {newest_url}"
+
+    return f"  shape=madara chapters={len(chapters)} newest='{newest_name}' images={len(images)}"
+
+
+def check(entry):
+    site = entry["url"].rstrip("/")
+    # Same dispatch as chapterList: a path means one series on a multi-series host.
+    print(check_madara(site) if urlparse(site).path.strip("/") else check_rest(site))
 
 
 def main():
