@@ -47,10 +47,15 @@ def assert_chapters(names, site):
     unnumbered = [n for n in names if number(n) is None]
     assert not unnumbered, f"{len(unnumbered)} titles have no chapter number, e.g. {unnumbered[:2]}"
 
-    repeated = [n for n, count in Counter(number(n) for n in names).items() if count > 1]
-    assert not repeated, (
-        f"chapter numbers {sorted(repeated)[:5]} appear more than once -- {site} is probably "
-        "several series, or a blog, rather than one manga"
+    # A real series occasionally re-publishes a chapter under a new slug (fixed re-upload,
+    # renamed title) -- that's a pair, at most, however many chapters it happens to. A blog
+    # mixing several series collides on the same number three times or more, since every
+    # series restarts around "chapter 1".
+    counts = Counter(number(n) for n in names)
+    overcrowded = {n: c for n, c in counts.items() if c > 2}
+    assert not overcrowded, (
+        f"chapter numbers appear 3+ times, e.g. {list(overcrowded.items())[:5]} -- {site} is "
+        "probably several series, or a blog, rather than one manga"
     )
 
 
@@ -60,9 +65,15 @@ def rest_url(site, post_type, query):
     return f"{site}/wp-json/wp/v2/{post_type}?{query}"
 
 
+CUSTOM_TYPES = ("comic", "manga")
+
+
 def post_type(site):
-    status, body = get(rest_url(site, "comic", "per_page=1"))
-    return "comic" if status == 200 and body.strip() != "[]" else "posts"
+    for type_ in CUSTOM_TYPES:
+        status, body = get(rest_url(site, type_, "per_page=1"))
+        if status == 200 and body.strip() != "[]":
+            return type_
+    return "posts"
 
 
 def chapter_list(site, kind):
@@ -93,7 +104,9 @@ def check_rest(site):
     assert status == 200, f"slug lookup failed with HTTP {status}"
     found = json.loads(body)
     assert found, f"slug '{slug}' returned nothing"
-    images = re.findall(r"<img[^>]+\ssrc=\"([^\"]+)\"", found[0]["content"]["rendered"])
+    # Sites differ on quote style, and src can be the first attribute (nothing before it to
+    # make [^>]+ match) -- Jsoup in the Kotlin parser cares about neither.
+    images = re.findall(r"<img[^>]*\ssrc=[\"']([^\"']+)[\"']", found[0]["content"]["rendered"])
     assert images, f"no <img src> in chapter '{slug}'"
 
     return f"  shape=rest type={kind} chapters={len(posts)} newest='{slug}' images={len(images)}"
