@@ -145,6 +145,8 @@ def check(entry):
 
 
 def main():
+    # Windows consoles default to cp1252, which can't print the non-ASCII titles sites carry.
+    sys.stdout.reconfigure(encoding="utf-8")
     with open(MANIFEST, encoding="utf-8") as fh:
         entries = json.load(fh)
     assert entries, "manifest is empty"

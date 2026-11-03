@@ -247,6 +247,10 @@ abstract class MyCurated : KeiSource() {
     private fun Element.imageUrl(): String? = sequenceOf("data-src", "src")
         .map { absUrl(it) }
         .firstOrNull(String::isNotBlank)
+        ?.let(::fullSizeBlogger)
+
+    // Blogger-hosted pages embed a sized thumbnail (/s320/); /s0/ is the original upload.
+    private fun fullSizeBlogger(url: String): String = if (url.contains(BLOGGER_HOST)) url.replace(BLOGGER_SIZE, "/s0/") else url
 
     private fun chapterNumber(name: String): Float = CHAPTER_NUMBER.find(name)
         ?.groupValues?.get(1)?.toFloatOrNull() ?: -1f
@@ -278,6 +282,8 @@ abstract class MyCurated : KeiSource() {
         private const val AJAX_CHAPTERS = "/ajax/chapters/"
         private val EMPTY_BODY = ByteArray(0).toRequestBody()
         private val CHAPTER_NUMBER = Regex("""chapter\s*([\d.]+)""", RegexOption.IGNORE_CASE)
+        private const val BLOGGER_HOST = "blogger.googleusercontent.com"
+        private val BLOGGER_SIZE = Regex("""/s\d+/""")
         private val WP_DATE: DateTimeFormatter = DateTimeFormatter.ISO_LOCAL_DATE_TIME
         private val MADARA_DATE: DateTimeFormatter = DateTimeFormatter.ofPattern("MM/dd/yyyy", Locale.ENGLISH)
     }
