@@ -85,7 +85,11 @@ abstract class MyCurated : KeiSource() {
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val site = manga.url.toHttpUrl()
+        // The library keeps the URL a title was added with, so a host swap in the manifest
+        // would never reach it. Re-resolve by title; if GitHub is down, the saved URL still works.
+        // ponytail: one manifest fetch per title per update, cache it if libraries get large.
+        val url = runCatching { manifest().firstOrNull { it.title == manga.title }?.url }.getOrNull() ?: manga.url
+        val site = url.toHttpUrl()
 
         return SMangaUpdate(
             manga = if (fetchDetails) details(manga, site) else manga,
