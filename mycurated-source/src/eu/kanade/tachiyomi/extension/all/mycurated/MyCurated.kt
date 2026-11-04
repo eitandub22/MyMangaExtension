@@ -88,11 +88,11 @@ abstract class MyCurated : KeiSource() {
         // The library keeps the URL a title was added with, so a host swap in the manifest
         // would never reach it. Re-resolve by title; if GitHub is down, the saved URL still works.
         // ponytail: one manifest fetch per title per update, cache it if libraries get large.
-        val url = runCatching { manifest().firstOrNull { it.title == manga.title }?.url }.getOrNull() ?: manga.url
-        val site = url.toHttpUrl()
+        val entry = runCatching { manifest().firstOrNull { it.title == manga.title } }.getOrNull()
+        val site = (entry?.url ?: manga.url).toHttpUrl()
 
         return SMangaUpdate(
-            manga = if (fetchDetails) details(manga, site) else manga,
+            manga = if (fetchDetails) details(manga, site, entry?.thumbnail) else manga,
             chapters = if (fetchChapters) chapterList(site) else chapters,
         )
     }
@@ -110,17 +110,18 @@ abstract class MyCurated : KeiSource() {
             .mapIndexed { index, image -> Page(index, imageUrl = image) }
     }
 
-    private suspend fun details(manga: SManga, site: HttpUrl): SManga {
+    private suspend fun details(manga: SManga, site: HttpUrl, pinned: String?): SManga {
         val document = client.get(site, headers).asJsoup()
 
         return SManga.create().also {
             it.title = manga.title
             it.url = manga.url
-            // ponytail: a cover pinned to the current mirror goes stale on rotation and
-            // self-heals on the next details refresh; rewriting the host would break the
-            // sites that serve covers from a separate img.* subdomain.
-            it.thumbnail_url = manga.thumbnail_url
+            // The saved cover can point at a host the manifest has since swapped away from, so
+            // a manifest-pinned cover wins, then the current site's og:image. The first <img>
+            // is a guess (often a logo), so it only fills in when nothing better exists.
+            it.thumbnail_url = pinned
                 ?: document.selectFirst("meta[property=og:image]")?.attr("content")
+                ?: manga.thumbnail_url
                 ?: document.selectFirst("img[src]")?.absUrl("src")
             it.description = document.selectFirst("meta[property=og:description]")?.attr("content")
         }
